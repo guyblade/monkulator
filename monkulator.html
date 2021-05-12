@@ -1,0 +1,378 @@
+<html>
+ <head>
+ <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+ <script src="small_bar_graph.js"></script>
+ <script>
+ function proficiency(lvl) {
+   return 1 + Math.ceil(lvl / 4);
+ }
+
+ function to_hit(lvl, dex_opt) {
+   return proficiency(lvl) + dex_mod(lvl, dex_opt);
+ }
+
+ function dex_mod(lvl, dex_opt) {
+   return 3 + (!dex_opt && (lvl >= 12)) +
+              (!dex_opt && (lvl >= 16)) +
+              (dex_opt && (lvl >= 4)) +
+              (dex_opt && (lvl >= 8));
+ }
+ function wis_mod(lvl, dex_opt) {
+   return 3 + (dex_opt && (lvl >= 12)) +
+              (dex_opt && (lvl >= 16)) +
+              (!dex_opt && (lvl >= 4)) +
+              (!dex_opt && (lvl >= 8));
+ }
+
+ function save_dc(lvl, dex_opt) {
+   return 8 +
+          proficiency(lvl) +
+          wis_mod(lvl, dex_opt);
+ }
+
+ let dx = (function() {
+   let base = Math.pow(2, 16);
+   return function(sides) {
+     let v = new Uint16Array(1);
+     window.crypto.getRandomValues(v);
+     return 1 + Math.floor(1.0 * sides * v[0] / base);
+   };
+ })();
+
+ let d20 = function() { return dx(20); };
+ let ad20 = function() { return Math.max(d20(), d20()); };
+
+ function monk_die(lvl) {
+   if (lvl < 5) return 4;
+   if (lvl < 11) return 6;
+   if (lvl < 17) return 8;
+   return 10;
+ }
+
+ function damage_roll(lvl, dex_opt, crit) {
+   return dex_mod(lvl, dex_opt) + dx(monk_die(lvl)) + (crit ? dx(monk_die(lvl)) : 0);
+ }
+
+ function run_trial(monk_lvl, dex_opt, ac, con_mod) {
+   let ret = {'ki_spent': 0,
+              'stunned': false,
+              'damage': 0};
+   let target_number = Math.min(20, Math.max(2, ac - to_hit(monk_lvl, dex_opt)));
+   let enemy_fails_under = save_dc(monk_lvl, dex_opt) - con_mod;
+
+   // Strategy: attack twice, if stunned, use bonus action to attack, it not
+   // flurry and continue trying to stun.
+   for (let i = 1; i <= 4; ++i) {
+     let stop_here = false;
+     if (i == 3) {
+       if (ret['stunned']) {
+         stop_here = true;
+       } else {
+         ++ret['ki_spent'];
+       }
+     }
+     let r1 = ret['stunned'] ? ad20() : d20();
+     if (r1 >= target_number) {
+       ret['damage'] += damage_roll(monk_lvl, dex_opt, r1 == 20);
+       if (!ret['stunned']) {
+         ret['stunned'] ||= (d20() < enemy_fails_under);
+         ++ret['ki_spent'];
+       }
+     }
+     if (stop_here) { break; } // no 4th attack if we stun in 1 or 2
+   }
+   return ret;
+ }
+
+ let cr_ac_conmod = [   [ 5, 15, 3],
+                        [ 6, 15, 3],
+                        [ 7, 15, 3],
+                        [ 8, 15, 4],
+                        [ 9, 16, 6],
+                        [10, 17, 5],
+                        [11, 17, 7],
+                        [12, 17, 6],
+                        [13, 17, 8],
+                        [14, 18, 9],
+                        [15, 18, 5],
+                        [16, 19, 7],
+                        [17, 19, 11],
+                        [18, 19, 10],
+                        [19, 18, 11],
+                        [20, 19, 13],
+                        [21, 19, 13],
+                        [22, 19, 11],
+                        [23, 21, 14],
+                        [24, 21, 14],
+                        [25, 21, 16],
+                        [26, 22, 15],
+                        [28, 24, 14],
+                        [30, 25, 10],
+                                        ];
+
+ let ac_by_cr = (function() {
+   let m = new Map();
+   for (let i = 0; i < cr_ac_conmod.length; ++i) {
+     m.set(cr_ac_conmod[i][0], cr_ac_conmod[i][1]);
+   }
+   return function (cr) {
+     return m.get(cr);
+   };
+ })();
+
+ let conmod_by_cr = (function() {
+   let m = new Map();
+   for (let i = 0; i < cr_ac_conmod.length; ++i) {
+     m.set(cr_ac_conmod[i][0], cr_ac_conmod[i][2]);
+   }
+   return function (cr) {
+     return m.get(cr);
+   };
+ })();
+
+ function add_zeroes(data) {
+   let max = 0;
+   Object.keys(data).forEach(function(key) {
+     let v = parseInt(key);
+     if (v > max) { max = v; }
+   });
+   for (let i = 0; i < max; ++i) {
+     if (! (i in data)) {
+       data[i] = 0;
+     }
+   }
+ }
+
+ function merge_histos(new_data, target) {
+   Object.keys(new_data).forEach(function(k) {
+     if (! (k in target)) {
+       target[k] = 0;
+     }
+     target[k] += new_data[k];
+   });
+ }
+
+ function average_from_histo(histo) {
+   let sum = 0;
+   let c = 0;
+   Object.keys(histo).forEach(function(key) {
+     let i_key = parseInt(key);
+     let cnt = histo[key];
+     sum += i_key * cnt;
+     c += cnt;
+   });
+   return 1.0 * sum / c;
+ }
+
+ function histo_sum(histo) {
+   let cnt = 0;
+   Object.keys(histo).forEach(function(i) {
+     cnt += histo[i];
+   });
+   return cnt;
+ }
+
+ function run_multi_trial_mt(trials, monk_lvl, dex_opt, ac, con_mod) {
+   let p = [];
+   let left = trials;
+   let threads = 8;
+   let pw = import("./promise_worker.js");
+   while (left > 0) {
+     let slice = Math.min(left, Math.floor(trials / threads));
+     let w = pw.then(function(pw) {
+       return pw.default("monkulator-worker.js", {
+         "trials": slice,
+         "monk_lvl": monk_lvl,
+         "dex_opt": dex_opt,
+         "ac": ac,
+         "con_mod": con_mod
+       });
+     });
+     p.push(w);
+     left -= slice;
+   }
+   window.pro = p;
+   return Promise.all(p).then(function(sub_results) {
+     console.log("All workers done!");
+     let result = {
+       'avg_ki_spent_for_stun': 0,
+       'stunned_cnt': 0,
+       'avg_damage': 0,
+       'ki_spent_histo': {1:0, 2:0, 3:0, 4:0, 5:0, 'f':0},
+       'damage_histo': {}
+     };
+     for(let i = 0; i < sub_results.length; ++i) {
+       merge_histos(sub_results[i].ki_spent_histo, result.ki_spent_histo);
+       merge_histos(sub_results[i].damage_histo, result.damage_histo);
+     }
+     result.avg_damage = average_from_histo(result.damage_histo);
+     let f = result.ki_spent_histo['f'];
+     delete result.ki_spent_histo['f'];
+     result.stunned_cnt = histo_sum(result.ki_spent_histo);
+     result.avg_ki_spent_for_stun = average_from_histo(result.ki_spent_histo);
+     result.ki_spent_histo['f'] = f;
+     result.trials = histo_sum(result.damage_histo);
+     result.stun_rate = 1.0 * result.stunned_cnt / result.trials;
+     add_zeroes(result['damage_histo']);
+     console.log(result);
+     return result;
+   }, function(err) { console.log(err); });
+ }
+
+ function run_multi_trial(trials, monk_lvl, dex_opt, ac, con_mod) {
+   if (use_multithread()) {
+     console.log("Multithread!");
+     return run_multi_trial_mt(trials, monk_lvl, dex_opt, ac, con_mod);
+   } else {
+     return run_multi_trial_st(trials, monk_lvl, dex_opt, ac, con_mod);
+   }
+ }
+
+ function run_multi_trial_st(trials, monk_lvl, dex_opt, ac, con_mod) {
+   let result = {
+     'avg_ki_spent_for_stun': 0,
+     'stunned_cnt': 0,
+     'avg_damage': 0,
+     'ki_spent_histo': {1:0, 2:0, 3:0, 4:0, 5:0, 'f':0},
+     'damage_histo': {}
+   };
+   for(let i = 0; i < trials; ++i) {
+     let r = run_trial(monk_lvl, dex_opt, ac, con_mod);
+     if (r['stunned']) {
+       result['stunned_cnt']++;
+       result['avg_ki_spent_for_stun'] += r['ki_spent'];
+       ++result['ki_spent_histo'][r['ki_spent']];
+     } else {
+       ++result['ki_spent_histo']['f'];
+     }
+     result['avg_damage'] += r['damage'];
+     if (!(r['damage'] in result['damage_histo'])) {
+       result['damage_histo'][r['damage']] = 0;
+     }
+     result['damage_histo'][r['damage']]++;
+   }
+   add_zeroes(result['damage_histo']);
+   result['avg_ki_spent_for_stun'] /= result['stunned_cnt'];
+   result['stun_rate'] = result['stunned_cnt'] / trials;
+   result['avg_damage'] /= trials;
+   return Promise.resolve(result);
+ }
+
+ function run_multi_trial_by_cr(trials, monk_lvl, dex_opt, cr) {
+   return run_multi_trial(trials, monk_lvl, dex_opt, ac_by_cr(cr), conmod_by_cr(cr));
+ }
+
+ function get_config() {
+   let level = parseInt($("#level").val());
+   let cr = parseInt($("#cr").val());
+   let trials = parseInt($("#trials").val());
+   let dex_opt = $("#optimization").val() == "Dexterity";
+   return {'level': level,
+           'cr': cr,
+           'trials': Math.pow(10, trials),
+           'dex_opt': dex_opt};
+ }
+
+ function two_sig_figs(v) {
+   return ("" + ( .01 * Math.floor(v * 100))).substr(0, 5);
+ }
+
+ function param_line(key, val) {
+   return "<em>" + key + "</em>: " + val + "<br />";
+ }
+
+
+ let generate_and_append_result = (function() {
+   let trial_number = 0;
+   return function() {
+     let conf = get_config();
+     let this_trial = ++trial_number;
+     // trials, monk_lvl, dex_opt, cr
+     run_multi_trial_by_cr(conf['trials'], conf['level'], conf['dex_opt'], conf['cr']).then(function(res) {
+       console.log(res);
+       let box = $("<div class='result'></div>");
+       let param = $("<span><strong>Parameters</strong><br />" +
+                     param_line("Trial Number", this_trial) + 
+                     param_line("Monk Level", conf['level']) +
+                     param_line("Optimize for", (conf['dex_opt'] ? "dex" : "wis")) +
+                     param_line("Enemy CR", conf['cr']) +
+                     param_line("Trials", conf['trials']) +
+                     "</span>");
+       let result = $("<span><strong>Result</strong><br />" +
+                      param_line("Successful Stun Rate", two_sig_figs(100 * res['stun_rate']) + "%") +
+                      param_line("Average Damage", two_sig_figs(res['avg_damage'])) +
+                      param_line("Average ki per stun", two_sig_figs(res['avg_ki_spent_for_stun'])) +
+                      param_line("Used Enemy AC", ac_by_cr(conf['cr'])) +
+                      param_line("Used Enemy Con Mod", "+" +  conmod_by_cr(conf['cr'])) +
+                      "</span>");
+       box.append(param);
+       box.append(result);
+       box.append(small_bar_grapher.draw_bar_graph(res.ki_spent_histo, {"height": 120, "width": 150}));
+       box.append(small_bar_grapher.draw_bar_graph(res.damage_histo, {"height": 120, "width": 400, "bar_color": "maroon"}));
+       $("#results").prepend(box);
+       console.log(box);
+     });
+   };
+ })();
+
+ function use_multithread() {
+   return $("#multithread").is(":checked");
+ }
+
+ $(function() {
+   $("#goer").click(function() {
+     generate_and_append_result();
+   });
+ });
+
+ </script>
+ <style>
+  .controls {
+    border: thin solid black;
+    padding: 1em;
+    spacing: 1em;
+  }
+  .result {
+    display: flex;
+    border: thin dashed grey;
+    margin: 4px;
+    padding: 4px;
+    spacing: 4px;
+  }
+  .result > span {
+    margin: 4px;
+  }
+ </style>
+ </head>
+ <body>
+  <div class="controls">
+   <strong>Assumptions:</strong> The monk starts with 16 Dex & Wisdom, then either focuses
+   on Wisdom or Dexterity for their next 4 ASIs (configured by the "optimize for" choice).
+   <br /><br />
+   Each trial simulates a "first turn" type situation. The monk uses the following rules:
+   <ul>
+    <li>If any attack hits and the target is not stunned, attempt to stun the target.</li>
+    <li>If, after the two attacks from the attack action, the target is <strong>not</strong> stunned, use flurry of blows.</li>
+    <li>Otherwise, use the bonus action single "marial arts" attack.</li>
+   </ul>
+   The AC/Con Mod values for each CR are taken from
+   <a href="https://www.reddit.com/r/dndnext/comments/jnol3b/table_of_average_acs_saving_throws_by_cr/gb3b2ve/">this table</a>.
+   <br/><br />
+   Monk Level: <input type='number' min='5' max='20' value='5' id='level'><br />
+   Optimize For: <select id='optimization'>
+                   <option selected>Wisdom</option>
+                   <option>Dexterity</option>
+                  </select><br />
+   Target Enemy CR: <input type='number' min='1' max='30' value='5' id='cr'><br />
+   Trials: <select id='trials'>
+            <option value="6">1,000,000</option>
+            <option value="5">100,000</option>
+            <option selected value="4">10,000</option>
+            <option value="3">1,000</option>
+           </select><br />
+   Use Multithreaded simulation (probably only works with chrome 91+): <input type='checkbox' id='multithread'></input></br>
+   <input id='goer' type='submit' value='Go!'></input>
+  </div>
+  <div id='results' class='results'></div>
+ </body>
+</html>
